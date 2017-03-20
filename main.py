@@ -557,7 +557,9 @@ def get_real_labelled_sample(show=False):
 ======================================== For integrated use ====================================================
 """
 
-def sequence_demo(show=False, show_small=False, write_out=False, draw_mispredict=False):
+demo_root = '/mnt/hdd3t/data/huva_cars/20170206-lornie-road/demos/number_sequence'
+
+def sequence_demo(show=False, show_small=False, write_out=False, draw_mispredict=False, mode='detect'):
     """
     1. For every image in output_root/with_plates/*.jpg
     2. Get all the plate proposal regions from name_to_boxes.pkl
@@ -567,20 +569,26 @@ def sequence_demo(show=False, show_small=False, write_out=False, draw_mispredict
     6. Also count number of proposals and numbers of plates detected
     -- model6: 17466 / 10302 (margin=0.15, base=60, target_range=135)
        - (0.35, 0.15), (110)
-    -- model8: 17466 / 12103 (margin=0.15, base=60, target_range=135)
+    -- model8: 17466 / 12179 (margin=0.15, base=60, target_range=135)
        - (0.35, 0.15), (110)
     """
-    output_root = '/mnt/hdd3t/data/huva_cars/20170206-lornie-road/demos/number_sequence'
+    output_root = demo_root
     raw_filenames = sorted(glob(output_root+'/raw/*.jpg'))
     name_to_boxes = cPickle.load(open(os.path.join(output_root, 'with_plates', 'name_to_boxes.pkl')))
     short_names = sorted(name_to_boxes.keys())
     """ Count (number of plate proposals, number of plates detected) """
-    num_plates_proposed = 0
-    num_plates_detected = 0
-    for short_name in short_names:
+    if mode=='detect':
+        num_plates_proposed = 0
+        num_plates_detected = 0
+    elif mode=='integrate':
+        fidx_to_car_insts = []
+        integrator = LPRFrameIntegrator()
+    for fidx, short_name in enumerate(short_names):
         img_color = cv2.imread(os.path.join(output_root, 'raw', short_name))
         img = cv2.imread(os.path.join(output_root, 'raw', short_name), 0)
         boxes = name_to_boxes[short_name]
+        if mode=='integrate':
+            car_insts = [] # [(x1,y1,x2,y2), car_info] for LPRFrameIntegrator
         for box in boxes:
             x1,y1,x2,y2 = box
             w = x2 - x1
@@ -598,37 +606,150 @@ def sequence_demo(show=False, show_small=False, write_out=False, draw_mispredict
             w = x2 - x1
             h = y2 - y1
             if w<10 or h < 10: continue
+            """ crop """
             plate_crop = img[y1:y2, x1:x2]
             if show_small:
                 print('plate_crop')
                 plt.imshow(plate_crop, cmap='gray');
                 plt.show()
+            """ resize crop """
             plate_crop_scaled = get_scaled_crop(plate_crop)
             if show_small:
                 print('plate_crop_scaled')
                 plt.imshow(plate_crop_scaled[:,:,0], cmap='gray');
                 plt.show()
+            """ enhance crop """
             plate_crop_scaled = plate_crop_scaled.astype(np.float32)
             plate_crop_scaled = change_contrast(plate_crop_scaled, 60, 135)
+            """ pass to model and get sequence """
             heatmaps = pass_imgs(np.expand_dims(plate_crop_scaled, 0)).numpy()
             sequences, filtered = infer_sequences(heatmaps[0])
-            cv2.rectangle(img_color, (x1,y1), (x2,y2), (0,0,255), 3)
-            num_plates_proposed += 1
-            if len(filtered) != 0:
-                str_seq = filtered[0].get_str_seq()
-                cv2.putText(img_color, str_seq, (x1,y1-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
-                num_plates_detected += 1
-            elif draw_mispredict and len(sequences)>0:
-                str_seq = sequences[0].get_str_seq()
-                cv2.putText(img_color, str_seq, (x1,y1-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 3)
+            """ mode-specific stuffs """
+            if mode=='detect':
+                num_plates_proposed += 1
+                if write_out:
+                    cv2.rectangle(img_color, (x1,y1), (x2,y2), (0,0,255), 3)
+                if len(filtered) != 0:
+                    num_plates_detected += 1
+                    str_seq = filtered[0].get_str_seq()
+                    if write_out:
+                        cv2.putText(img_color, str_seq, (x1,y1-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
+                elif write_out and draw_mispredict and len(sequences)>0:
+                    str_seq = sequences[0].get_str_seq()
+                    cv2.putText(img_color, str_seq, (x1,y1-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 3)
+            elif mode=='integrate':
+                x = (x1+x2)/2
+                y = (y1+y2)/2
+                # find car_info of previous car
+                if fidx==0: # just create new car
+                    car_info = CarInfo()
+                else:
+                    prev_car_instance = find_nearest_car(box, fidx_to_car_insts[fidx-1])
+                    if prev_car_instance is None:
+                        car_info = CarInfo()
+                    else:
+                        car_info = prev_car_instance[1]
+                if len(filtered):
+                    car_info.add_plate(box, filtered[0].get_str_seq(), filtered[0].prob)
+                car_instance = (box, car_info)
+                car_insts.append(car_instance)
         print(short_name)
-        if write_out:
+        if mode=='detect' and write_out:
             out_path = os.path.join(output_root, 'with_numbers_2', short_name)
             cv2.imwrite(out_path, img_color)
-        if show:
-            plt.imshow(img_color)
-            plt.show()
-    print(num_plates_proposed, num_plates_detected)
+        elif mode=='integrate':
+            fidx_to_car_insts.append(car_insts)
+            integrator.add_frame(short_name, img_color, car_insts)
+        else:
+            assert False, 'unknown mode={}'.format(mode)
+    if mode=='detect':
+        print(num_plates_proposed, num_plates_detected)
+    elif mode=='integrate':
+        integrator.flush()
+
+def find_nearest_car(box, prev_car_insts, threshold=100):
+    x1,y1,x2,y2 = box
+    x = (x1+x2)/2
+    y = (y1+y2)/2
+    nearest_dist = 9999
+    nearest_car  = None
+    for pbox, pcar_info in prev_car_insts:
+        px1,py1,px2,py2 = pbox
+        px = (px1 + px2) / 2
+        py = (py1 + py2) / 2
+        dist = math.sqrt( (x-px)**2 + (y-py)**2 )
+        if dist < nearest_dist:
+            nearest_dist = dist
+            nearest_car  = (pbox, pcar_info)
+    if nearest_dist < threshold:
+        return nearest_car
+    else:
+        return None
+
+class CarInfo:
+    def __init__(self):
+        self.color = (random.randint(0,255), random.randint(0,255), random.randint(0,255))
+        while sum(self.color) < 150:
+            self.color = (random.randint(0,255), random.randint(0,255), random.randint(0,255))
+        self.plates = [] # [(x1,y1,x2,y2, str_seq, prob)]
+        self.likely_sequence = None
+    def add_plate(self, (x1,y1,x2,y2), str_seq, prob):
+        assert self.likely_sequence is None, 'cannot add plate after get_likely_sequence has been called'
+        self.plates.append(((x1,y1,x2,y2), str_seq, prob))
+    def get_likely_sequence(self):
+        if self.likely_sequence is None:
+            strseq_to_score = {}
+            for plate in self.plates:
+                (x1,y1,x2,y2), str_seq, prob = plate
+                y = (y1+y2)/2
+                score = y # TODO prob * y
+                if str_seq not in strseq_to_score:
+                    strseq_to_score[str_seq] = 0
+                strseq_to_score[str_seq] += score
+            items = strseq_to_score.items()
+            if len(items)==0:
+                self.likely_sequence = ''
+            else:
+                likely_plate = sorted(items, reverse=True, key=lambda (strseq, score):score)[0]
+                if likely_plate[0] in ['AH662K', 'SJL799Y', 'S3279T']:
+                    print(self.plates)
+                self.likely_sequence = likely_plate[0]
+        return self.likely_sequence
+
+from collections import deque
+class LPRFrameIntegrator:
+    def __init__(self):
+        self.frames = deque(maxlen=100)
+    def add_frame(self, short_name, frame_img, car_insts):
+        """
+        car_insts: [((x1,y1,x2,y2), CarInfo)]
+        CarInfo: (color, [PlateInfo])
+        PlateInfo: (str_seq, (x,y), prob)
+        """
+        self.frames.appendleft((short_name, frame_img, car_insts))
+        while len(self.frames) > 90:
+            self.pop_frame()
+    def pop_frame(self):
+        short_name, frame_img, car_insts = self.frames.pop()
+        """ draw the cars """
+        for (x1,y1,x2,y2), car_info in car_insts:
+            color = car_info.color
+            strseq= car_info.get_likely_sequence()
+            x1 -= int(0.2 * (x2-x1))
+            x2 += int(0.2 * (x2-x1))
+            y1 -= int(0.2 * (y2-y1))
+            y2 += int(0.2 * (y2-y1))
+            cv2.rectangle(frame_img, (x1,y1), (x2,y2), color, 3)
+            (w,h),baseline = cv2.getTextSize(strseq, cv2.FONT_HERSHEY_SIMPLEX, 1, 3)
+            cv2.rectangle(frame_img, (x1, y1-5-h), (x1+w, y1-3), (0,0,0), thickness=cv2.cv.CV_FILLED)
+            cv2.putText(frame_img, strseq, (x1,y1-5), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3)
+        output_root = demo_root
+        outpath = os.path.join(output_root, 'with_plate_tracking', short_name)
+        cv2.imwrite(outpath, frame_img)
+    def flush(self):
+        while len(self.frames):
+            self.pop_frame()
+
 
 
 def test():

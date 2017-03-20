@@ -11,7 +11,7 @@ num_classes = num_foreground + 1
 
 debug_items = []
 class HeatBlob:
-    def __init__(self, centerx, centery, w, h, blobmask, maskedheat, char=None, fore_blobs=None):
+    def __init__(self, centerx, centery, w, h, blobmask, maskedheat, char=None):
         self.centerx = centerx
         self.centery = centery
         self.w = w
@@ -21,33 +21,22 @@ class HeatBlob:
         self.area = blobmask.sum()
         self.totalheat = maskedheat.sum()
         self.char = char # is None for background blobs, otherwise is the corresponding character
-        if fore_blobs is None: fore_blobs = []
-        self.fore_blobs = fore_blobs
+        self.fore_blobs = []
         self.distribution = {} # maps character to (probability, blob)
+
     def compute_distribution(self, heatmaps):
         """
         self has to be a background blob
-        Given the fore_blobs associated with this back_blob, compute the probability of each fore_blob using their
-        totalheat
+        Given the blobmask of the background blob, compute the foreground probability distribution over characters
         """
         assert self.char is None, 'This func only works on background blobs'
-        """
-        heatsum = sum([b.totalheat for b in self.fore_blobs])
-        self.distribution = {}
-        for fore_blob in self.fore_blobs:
-            assert fore_blob.char is not None
-            self.distribution[fore_blob.char] = (fore_blob.totalheat / heatsum, fore_blob)
-        """
         assert len(self.fore_blobs)==0
-        self.fore_blobs = []
         # compute total heat to make sure things make sense
+        totalheat = self.totalheat
+        # remove those blobs with less than 10% probability
         char_heat = [0] * num_foreground
         for charid in range(num_foreground):
             char_heat[charid] = (heatmaps[charid] * self.blobmask).sum()
-        totalheat = sum(char_heat)
-        assert abs(totalheat - self.totalheat) < 0.0001
-        # remove those blobs with less than 1% probability
-        for charid in range(num_foreground):
             if char_heat[charid] < totalheat * 0.10:
                 char_heat[charid] = 0
         totalheat = sum(char_heat)
@@ -59,6 +48,7 @@ class HeatBlob:
                                      self.blobmask, self.blobmask * heatmaps[charid], char=char)
                 self.fore_blobs.append(fore_blob)
                 self.distribution[char] = (char_heat[charid] / totalheat, fore_blob)
+
     def __repr__(self):
         return str(self.char)
 
@@ -74,7 +64,7 @@ class PlateSequence:
         return str(self)
 
 
-def get_blobs_from_heatmap(heatmap, char, threshold):
+def get_blobs_from_heatmap(heatmap, threshold):
     global debug_items
     """
     heatmap: HxW
@@ -93,30 +83,27 @@ def get_blobs_from_heatmap(heatmap, char, threshold):
         centery = y + h / 2
         if blobmask.sum() < 4: continue # skip blob if it's too small
         """ sometimes 2 blobs are joined together, detect and handle that"""
-        if 'wh' in debug_items and char in debug_items:
-            print(w, h)
         aspect_ratio = w / float(h)
-        if (char=='1' and aspect_ratio >= 1.5) or (char!='1' and aspect_ratio >= 2.0):
-            centerx1 = int(centerx - w * 0.25)
-            centerx2 = int(centerx + w * 0.25)
-            blobmask_selector1 = np.zeros((H,W), np.float32)
-            blobmask_selector2 = np.zeros((H,W), np.float32)
-            blobmask_selector1[:, :centerx] = 1
-            blobmask_selector2[:, centerx:] = 1
-            blobmask1 = blobmask * blobmask_selector1
-            blobmask2 = blobmask * blobmask_selector2
-            maskedheat1 = blobmask1 * heatmap
-            maskedheat2 = blobmask2 * heatmap
-            if blobmask1.sum() >= 4:
-                blobs.append(HeatBlob(centerx1, centery, w/2, h, blobmask1, maskedheat1, char))
-            if blobmask2.sum() >= 4:
-                blobs.append(HeatBlob(centerx2, centery, w/2, h, blobmask2, maskedheat2, char))
-        else:
+        if aspect_ratio < 2.0:
             maskedheat = blobmask * heatmap
-            blobs.append(HeatBlob(centerx, centery, w, h, blobmask, maskedheat, char))
-    if char in debug_items:
-        plt.imshow(threshed)
-        plt.show()
+            blobs.append(HeatBlob(centerx, centery, w, h, blobmask, maskedheat))
+        else:
+            number_blobs = int(aspect_ratio)
+            blob_width = w / float(number_blobs) # float
+            start_x_float = centerx - w/float(2) # float
+            for i in xrange(number_blobs):
+                end_x_float = start_x_float + blob_width
+                start_x = int(round(start_x_float))
+                end_x   = int(round(end_x_float))
+                mid_x   = (start_x + end_x) / 2
+                blobmask_selector = np.zeros((H,W), np.float32)
+                blobmask_selector[:, start_x:end_x] = 1
+                blobmask_selected = blobmask * blobmask_selector
+                maskedheat_selected = blobmask_selected * heatmap
+                if blobmask_selected.sum() >= 4:
+                    blobs.append(HeatBlob(mid_x, centery, int(blob_width), h, 
+                                          blobmask_selected, maskedheat_selected))
+                start_x_float = end_x_float
     return blobs
 
 def pre_sort_blobs(blobs):
@@ -165,28 +152,6 @@ def arrange_blobs_by_lines(blobs):
         startidx += len(peers)
     return lines
 
-def associate_fore_back(fore_blob, back_blobs, thresh=3):
-    global debug_items
-    """
-    Find the background blob that the fore_groundblob is closest to. If the distance is below threshold, add the
-    foreground_blob to the corresponding background blob's fore_blobs
-    """
-    dist_min = 99999
-    blob_min = None
-    for back_blob in back_blobs:
-        fx,fy = fore_blob.centerx, fore_blob.centery
-        bx,by = back_blob.centerx, back_blob.centery
-        dist = math.sqrt((fx - bx)**2 + (fy - by)**2)
-        if dist < dist_min:
-            dist_min = dist
-            blob_min = back_blob
-    if dist_min <= thresh:
-        blob_min.fore_blobs.append(fore_blob)
-        return True
-    else:
-        if 'warn' in debug_items:
-            print('Association failure', dist_min, thresh)
-        return False
 
 def infer_sequences(heatmaps, shows=[]):
     global debug_items
@@ -194,49 +159,30 @@ def infer_sequences(heatmaps, shows=[]):
     """
     heatmaps: num_classes by H by W
     Infer the number sequence from the heats
-    1. Extract the background blobs, sort by order or top-to-bottom, left-to-right
+    1. Extract the background blobs, and compute their fore-ground distribution
     2. Arrange background blobs by lines
-    3. Find blobs for all foreground heatmaps
-    4. Associate foreground heat blobs with background heatblobs
-    5. for each back_blob, compute a distribution over its associated fore_blobs
-    6. Pull out the raw sequences
-    7. Postprocess sequences
+    3. Pull out the raw sequences
+    4. Postprocess sequences
     """
     """ get the character blobs from background """
     background = 1 - heatmaps[num_classes-1]
     if 1 in debug_items:
         plt.imshow(background)
         plt.show()
-    back_blobs = get_blobs_from_heatmap(background, None, 0.3)
+    back_blobs = get_blobs_from_heatmap(background, 0.3)
+    """ for each back_blob, compute its foreground distribution """
+    for back_blob in back_blobs:
+        back_blob.compute_distribution(heatmaps)
+        if 'info' in debug_items:
+            pprint(back_blob.distribution)
     """ 1-line or 2-line? """
     back_blobs = pre_sort_blobs(back_blobs)
     lines = arrange_blobs_by_lines(back_blobs)
     for i,line in enumerate(lines):
         lines[i] = sort_blobs_by_x(line)
     back_blobs = sum(lines, [])
-
     if 'info' in debug_items:
         print('number of lines: {}, lengths: {}'.format(len(lines), map(len, lines)))
-    """
-    # Find blobs for all foreground heatmaps 
-    char_heatblobs = {}
-    for charid in xrange(num_foreground):
-        char = charid_to_char(charid)
-        heatblobs = get_blobs_from_heatmap(heatmaps[charid], char, 0.1)
-        char_heatblobs[char] = heatblobs
-    # Associate foreground blobs with background blobs
-    for char, heatblobs in char_heatblobs.iteritems():
-        if len(heatblobs) == 0: continue
-        for i, fore_blob in enumerate(heatblobs):
-            associate_success = associate_fore_back(fore_blob, back_blobs)
-            if not associate_success and 'warn' in debug_items:
-                print("Warning: {}th blob for {} was not associated".format(i, char))
-    """
-    # for each back_blob, compute a distribution over its associated fore_blobs 
-    for back_blob in back_blobs:
-        back_blob.compute_distribution(heatmaps)
-        if 'info' in debug_items:
-            pprint(back_blob.distribution)
     """ Pull out the raw sequences """
     if sum([len(line) for line in lines]) > 13: # some crazy shit have so many blobs it explodes here
         return [], []
@@ -447,10 +393,10 @@ def has_valid_checksum(seq):
 
 """
 todos:
-- change back-blob based distribution computation to remove foreground thresholding, and use 
-  backblob.heatmask * foreground[charid] instead
 - proper line filtering
 - proper line detection
+* change back-blob based distribution computation to remove foreground thresholding, and use 
+  backblob.heatmask * foreground[charid] instead
 * filter out bad checksums
 * use checksum logic to fixup plates when everything gets filtered out
 """
