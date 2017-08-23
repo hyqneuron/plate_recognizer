@@ -557,7 +557,7 @@ def get_real_labelled_sample(show=False):
 ======================================== For integrated use ====================================================
 """
 
-demo_root = '/mnt/hdd3t/data/huva_cars/20170206-lornie-road/demos/number_sequence'
+demo_root = '/mnt/hdd3t/data/huva_cars/20170206-lornie-road/demos/number_sequence_7422'
 
 def sequence_demo(show=False, show_small=False, write_out=False, draw_mispredict=False, mode='detect'):
     """
@@ -667,7 +667,7 @@ def sequence_demo(show=False, show_small=False, write_out=False, draw_mispredict
     elif mode=='integrate':
         integrator.flush()
 
-def find_nearest_car(box, prev_car_insts, threshold=100):
+def find_nearest_car(box, prev_car_insts, threshold=200):
     x1,y1,x2,y2 = box
     x = (x1+x2)/2
     y = (y1+y2)/2
